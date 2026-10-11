@@ -1,3 +1,5 @@
 .env
 venv/
 __pycache__/
+# ローカル保存用のデータ（Upstash未設定時にできるJSON）
+*_data.json
