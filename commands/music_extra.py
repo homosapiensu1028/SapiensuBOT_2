@@ -4,16 +4,18 @@
 ・/music の拡張（もう1曲ボタン・同ジャンルボタン・⭐お気に入り・👍・count/equal/vc オプション）
 ・/nowplaying      このチャンネルで直前に紹介した曲
 ・/music_search    曲の検索（誰でも使えます）
-・/bgm /bgm_edit /bgm_delete   プリセットプレイリスト
-・/music_export /music_import  曲ライブラリのJSON書き出し・取り込み
-・/music_dupes     重複曲の検出と倉庫への移動
+・/bgm             プリセットプレイリスト
+
 ・/music_gacha     曲ガチャ（紹介回数が少ない曲ほどレア）
 ・/favorite        お気に入り一覧・ランダム
 ・/music_ranking   👍ランキング・よく紹介される曲
-・/music_request /music_requests   曲のリクエストと承認
-・/music_linkcheck YouTubeリンク切れチェック（1日1回の自動チェックも）
+・/music_request   曲のリクエスト
+・YouTubeリンク切れチェック（1日1回の自動チェックも）
 ・/music_profile   自分（や他の人）の曲ライブラリ上のプロフィール
 ・/quiz_adder /quiz_ranking   この曲を登録したのは誰？クイズ
+
+※ プレイリスト作成・リクエスト承認・書き出し/取り込み・重複チェック・リンクチェック・自動投稿などの
+   管理操作は、/music_setting の「🧰 管理ツール」にまとめています（commands/music_admin.py）。
 
 保存先は music_extra_data.json（Upstash設定済みなら再起動しても消えません）。
 """
@@ -455,35 +457,11 @@ class PlaylistBuildView(discord.ui.View):
         )
 
 
-@bot.tree.command(name="bgm_edit", description="プレイリストを作成・上書きします（下級管理者専用）")
-async def bgm_edit(interaction: discord.Interaction):
-    if not M.is_sub_admin(interaction.user.id):
-        await interaction.response.send_message("このコマンドを使う権限がありません。", ephemeral=True)
-        return
-    await interaction.response.send_modal(PlaylistModal())
-
-
-@bot.tree.command(name="bgm_delete", description="プレイリストを削除します（下級管理者専用）")
-@app_commands.autocomplete(name=playlist_autocomplete)
-async def bgm_delete(interaction: discord.Interaction, name: str):
-    if not M.is_sub_admin(interaction.user.id):
-        await interaction.response.send_message("このコマンドを使う権限がありません。", ephemeral=True)
-        return
-    if EXTRA["playlists"].pop(name, None) is None:
-        await interaction.response.send_message("そのプレイリストはありません。", ephemeral=True)
-        return
-    save_extra()
-    await interaction.response.send_message(f"プレイリスト「{name}」を削除しました。", ephemeral=True)
-
-
 # =========================================================
 # 書き出し・取り込み
 # =========================================================
-@bot.tree.command(name="music_export", description="登録曲をJSONファイルで書き出します（下級管理者専用）")
-async def music_export(interaction: discord.Interaction):
-    if not M.is_sub_admin(interaction.user.id):
-        await interaction.response.send_message("このコマンドを使う権限がありません。", ephemeral=True)
-        return
+async def send_export(interaction: discord.Interaction):
+    """曲ライブラリをJSONにして、実行者だけに送る（/music_setting の管理ツールから）。"""
     data = {
         "exported_at": M.now_str(),
         "songs": M.SONGS,
@@ -493,28 +471,20 @@ async def music_export(interaction: discord.Interaction):
     raw = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     fname = f"music_export_{datetime.now(M.JST).strftime('%Y%m%d_%H%M')}.json"
     await interaction.response.send_message(
-        f"📦 {len(M.SONGS)}曲を書き出しました。/music_import で取り込めます。",
+        f"📦 {len(M.SONGS)}曲を書き出しました。このファイルを任意のチャンネルに投稿して、"
+        "管理ツールの「📥 取り込み」にそのメッセージのリンクを貼ると取り込めます。",
         file=discord.File(io.BytesIO(raw), filename=fname), ephemeral=True,
     )
 
 
-@bot.tree.command(name="music_import", description="/music_export のJSONから曲を取り込みます（管理者専用）")
-@app_commands.describe(file="/music_export で出力したJSONファイル")
-async def music_import(interaction: discord.Interaction, file: discord.Attachment):
-    if not M.is_admin(interaction.user.id):
-        await interaction.response.send_message("このコマンドを使う権限がありません。", ephemeral=True)
-        return
-    if file.size > 2 * 1024 * 1024:
-        await interaction.response.send_message("ファイルが大きすぎます（2MBまで）。", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
+def import_songs(raw: bytes, actor) -> tuple:
+    """書き出しJSONから曲を取り込む。戻り値は (追加数, スキップ数)。形式が不正なら ValueError。"""
     try:
-        data = json.loads((await file.read()).decode("utf-8"))
+        data = json.loads(raw.decode("utf-8"))
         items = data["songs"] if isinstance(data, dict) else data
         assert isinstance(items, list)
     except Exception:
-        await interaction.followup.send("JSONを読み込めませんでした。/music_export のファイルか確認してください。", ephemeral=True)
-        return
+        raise ValueError("JSONを読み込めませんでした。書き出したファイルか確認してください。")
 
     existing = {norm_url(s.get("url")) for s in M.SONGS}
     added = skipped = 0
@@ -529,22 +499,19 @@ async def music_import(interaction: discord.Interaction, file: discord.Attachmen
         M.register_genre(genre)
         M.SONGS.append({
             "id": M.alloc_id(), "title": title[:200], "url": url, "genre": genre,
-            "added_by_id": it.get("added_by_id") if isinstance(it.get("added_by_id"), int) else interaction.user.id,
-            "added_by_name": str(it.get("added_by_name") or M.actor_name(interaction.user))[:60],
+            "added_by_id": it.get("added_by_id") if isinstance(it.get("added_by_id"), int) else actor.id,
+            "added_by_name": str(it.get("added_by_name") or M.actor_name(actor))[:60],
             "added_at": str(it.get("added_at") or M.now_str()), "ever_deleted": False,
         })
         existing.add(norm_url(url))
         added += 1
         M.add_log({
-            "type": "add", "actor_id": interaction.user.id, "actor_name": M.actor_name(interaction.user),
+            "type": "add", "actor_id": actor.id, "actor_name": M.actor_name(actor),
             "title": title, "url": url, "genre": genre,
         })
     if added:
         M.save_songs(M.SONGS)
-    await interaction.followup.send(
-        f"📥 取り込み完了: 追加 {added}曲 / スキップ {skipped}件（URL重複・不正データ）\n"
-        "※ プレイリストは曲IDが変わるため取り込まれません。", ephemeral=True,
-    )
+    return added, skipped
 
 
 # =========================================================
@@ -600,11 +567,7 @@ class DupeView(discord.ui.View):
         )
 
 
-@bot.tree.command(name="music_dupes", description="URLが重複している曲を検出します（下級管理者専用）")
-async def music_dupes(interaction: discord.Interaction):
-    if not M.is_sub_admin(interaction.user.id):
-        await interaction.response.send_message("このコマンドを使う権限がありません。", ephemeral=True)
-        return
+async def show_dupes(interaction: discord.Interaction):
     groups = find_dupes()
     if not groups:
         await interaction.response.send_message("重複している曲はありません ✨", ephemeral=True)
@@ -839,11 +802,7 @@ class RequestsView(discord.ui.View):
         await interaction.response.edit_message(embed=e, view=self)
 
 
-@bot.tree.command(name="music_requests", description="曲リクエストの承認・却下（下級管理者専用）")
-async def music_requests(interaction: discord.Interaction):
-    if not M.is_sub_admin(interaction.user.id):
-        await interaction.response.send_message("このコマンドを使う権限がありません。", ephemeral=True)
-        return
+async def show_requests(interaction: discord.Interaction):
     view = RequestsView(interaction.user.id)
     await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
 
@@ -907,11 +866,7 @@ def link_report_embed(bad: list, checked_at: str) -> discord.Embed:
     return e
 
 
-@bot.tree.command(name="music_linkcheck", description="登録曲のYouTubeリンク切れを確認します（下級管理者専用）")
-async def music_linkcheck(interaction: discord.Interaction):
-    if not M.is_sub_admin(interaction.user.id):
-        await interaction.response.send_message("このコマンドを使う権限がありません。", ephemeral=True)
-        return
+async def run_linkcheck_interaction(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     bad = await run_link_check()
     await interaction.followup.send(embed=link_report_embed(bad, EXTRA["link_check"].get("at", "")), ephemeral=True)
