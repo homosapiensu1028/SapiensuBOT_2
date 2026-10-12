@@ -1,7 +1,7 @@
 """
 毎日の自動投稿：☀️今日の一曲
 
-・/daily_setting を実行したチャンネルに、毎日決まった時刻（JST）に投稿します。
+・/music_setting →「🧰 管理ツール」→「📅 毎日の自動投稿」で設定したチャンネルに、毎日決まった時刻（JST）に投稿します。
 ・「今日の一曲」はその日の日付から決まるので、同じ日に何度やっても同じ曲です。
 ・botが落ちていて投稿時刻を過ぎてしまっても、復帰したその日のうちに1回だけ投稿します（1分ごとにチェック）。
 ・複数プロセスで動いても二重投稿しないよう、Upstash設定済みなら早い者勝ちの印を使います。
@@ -11,20 +11,12 @@ import random
 from datetime import datetime
 
 import discord
-from discord import app_commands
 from discord.ext import commands as ext_commands, tasks
 
 from bot_core.bot import bot
 from bot_core.storage import claim_once
 from commands import music as M
 from commands.music_extra import EXTRA, save_extra, build_song_payload, record_shown
-
-
-def _allowed(interaction: discord.Interaction) -> bool:
-    if M.is_sub_admin(interaction.user.id):
-        return True
-    perms = getattr(interaction.user, "guild_permissions", None)
-    return bool(perms and (perms.manage_guild or perms.administrator))
 
 
 async def post_daily(guild_id: int, cfg: dict, today: str):
@@ -40,47 +32,63 @@ async def post_daily(guild_id: int, cfg: dict, today: str):
         print(f"[daily] 投稿に失敗しました（guild={guild_id}）: {ex}")
 
 
-@bot.tree.command(name="daily_setting", description="毎日の自動投稿（今日の一曲）を、このチャンネルに設定します")
-@app_commands.describe(
-    enable="ON：このチャンネルに毎日投稿 / OFF：停止",
-    hour="投稿する時刻（日本時間・0〜23時）",
-    now="設定したあと、お試しで今すぐ1回投稿する",
-)
-async def daily_setting(
-    interaction: discord.Interaction,
-    enable: bool = True,
-    hour: app_commands.Range[int, 0, 23] = 9,
-    now: bool = False,
-):
-    if interaction.guild is None:
-        await interaction.response.send_message("このコマンドはサーバー内でのみ使用できます。", ephemeral=True)
-        return
-    if not _allowed(interaction):
-        await interaction.response.send_message("下級管理者か、サーバー管理権限のある人だけが設定できます。", ephemeral=True)
-        return
+def describe_daily(guild: discord.Guild | None) -> str:
+    """管理ツールの画面に出す、今の設定の説明。"""
+    cfg = EXTRA["daily"].get(str(guild.id)) if guild else None
+    if not cfg:
+        return "未設定"
+    ch = guild.get_channel(cfg.get("channel_id"))
+    return f"{ch.mention if ch else '（チャンネル不明）'} に毎日 {cfg.get('hour', 9)}時（JST）"
 
-    gid = str(interaction.guild.id)
-    if not enable:
-        EXTRA["daily"].pop(gid, None)
+
+class DailyModal(discord.ui.Modal, title="毎日の自動投稿（今日の一曲）"):
+    """/music_setting の管理ツールから開く。いま開いているチャンネルに投稿します。"""
+
+    def __init__(self, guild: discord.Guild | None):
+        super().__init__()
+        cfg = EXTRA["daily"].get(str(guild.id)) if guild else None
+        self.hour_in = discord.ui.TextInput(
+            label="投稿する時刻（日本時間 0〜23）／空欄で停止",
+            required=False, max_length=2, default=str(cfg["hour"]) if cfg else "9",
+        )
+        self.now_in = discord.ui.TextInput(
+            label="お試し投稿（yes と入力で今すぐ1回投稿）", required=False, max_length=3,
+        )
+        self.add_item(self.hour_in)
+        self.add_item(self.now_in)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("この設定はサーバー内でのみ使用できます。", ephemeral=True)
+            return
+        gid = str(interaction.guild.id)
+        text = self.hour_in.value.strip()
+        if not text:
+            EXTRA["daily"].pop(gid, None)
+            save_extra()
+            await interaction.response.send_message("毎日の自動投稿を停止しました。", ephemeral=True)
+            return
+        if not text.isdigit() or not 0 <= int(text) <= 23:
+            await interaction.response.send_message("時刻は 0〜23 の数字で入力してください。", ephemeral=True)
+            return
+        hour = int(text)
+
+        cfg = {"channel_id": interaction.channel_id, "hour": hour, "last_date": None}
+        now_dt = datetime.now(M.JST)
+        today = now_dt.strftime("%Y-%m-%d")
+        # 設定した時刻をすでに過ぎている場合は、今日の分は投稿済みとして、明日から始める
+        if now_dt.hour >= hour:
+            cfg["last_date"] = today
+        EXTRA["daily"][gid] = cfg
         save_extra()
-        await interaction.response.send_message("毎日の自動投稿を停止しました。", ephemeral=True)
-        return
 
-    cfg = {"channel_id": interaction.channel_id, "hour": hour, "last_date": None}
-    today = datetime.now(M.JST).strftime("%Y-%m-%d")
-    # 設定した時刻をすでに過ぎている場合は、今日の分は投稿済みとして、明日から始める
-    if datetime.now(M.JST).hour >= hour:
-        cfg["last_date"] = today
-    EXTRA["daily"][gid] = cfg
-    save_extra()
-
-    start = "明日" if cfg["last_date"] == today else "今日"
-    await interaction.response.send_message(
-        f"✅ {interaction.channel.mention} に、毎日 {hour}時（JST）に **今日の一曲** を投稿します（{start}から）。",
-        ephemeral=True,
-    )
-    if now:
-        await post_daily(interaction.guild.id, cfg, today)
+        start = "明日" if cfg["last_date"] == today else "今日"
+        await interaction.response.send_message(
+            f"✅ <#{interaction.channel_id}> に、毎日 {hour}時（JST）に **今日の一曲** を投稿します（{start}から）。",
+            ephemeral=True,
+        )
+        if self.now_in.value.strip().lower() in ("yes", "y"):
+            await post_daily(interaction.guild.id, cfg, today)
 
 
 class DailyCog(ext_commands.Cog):
