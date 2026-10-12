@@ -38,6 +38,9 @@ class MyBot(ext_commands.Bot):
         # 毎日の自動投稿（今日の一曲）。music_extra の後に読み込む
         await self.load_extension("commands.daily")
 
+        # /music_setting の「🧰 管理ツール」画面（起動時に読み込めるか確認しておく）
+        import commands.music_admin  # noqa: F401
+
         # スラッシュコマンドをDiscord側に同期する（起動時に1回）
         await self.tree.sync()
 
