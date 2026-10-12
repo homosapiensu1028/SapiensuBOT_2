@@ -1026,6 +1026,10 @@ class MusicSettingView(discord.ui.View):
         copy_button.callback = self._on_export_titles
         self.add_item(copy_button)
 
+        tools_button = discord.ui.Button(label="🧰 管理ツール", style=discord.ButtonStyle.primary, row=2)
+        tools_button.callback = self._on_tools
+        self.add_item(tools_button)
+
         if self.filters:
             clear_button = discord.ui.Button(label="🔄 検索解除", style=discord.ButtonStyle.secondary, row=2)
             clear_button.callback = self._clear_filters
@@ -1047,6 +1051,18 @@ class MusicSettingView(discord.ui.View):
         await interaction.response.send_message(head, ephemeral=True)
         for chunk in chunks:
             await interaction.followup.send(chunk, ephemeral=True)
+
+    async def _on_tools(self, interaction: discord.Interaction):
+        # プレイリスト・リクエスト承認・書き出し/取り込み・重複/リンクチェック・自動投稿などの管理操作
+        try:
+            from commands.music_admin import AdminToolsView, tools_embed
+        except Exception as e:
+            print(f"[music] 管理ツールを読み込めませんでした: {e}")
+            await interaction.response.send_message("管理ツールを読み込めませんでした。", ephemeral=True)
+            return
+        await interaction.response.edit_message(
+            embed=tools_embed(interaction.guild), view=AdminToolsView(self.admin_id)
+        )
 
     async def _on_add(self, interaction: discord.Interaction):
         await interaction.response.send_modal(AddSongModal(self.admin_id, self.page))
@@ -1088,7 +1104,7 @@ class MusicSettingView(discord.ui.View):
 
 @bot.tree.command(
     name="music_setting",
-    description="曲の一覧表示・追加・編集・削除・ログ確認などを行います（下級管理者専用）"
+    description="曲の一覧表示・追加・編集・削除・ログ確認・プレイリストやリクエストの管理などを行います（下級管理者専用）"
 )
 @app_commands.describe(song="編集・削除したい曲名を入力すると候補が出ます（選ぶと直接その曲の画面が開きます）")
 @app_commands.autocomplete(song=song_search_autocomplete)
